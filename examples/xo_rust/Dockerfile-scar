@@ -1,0 +1,96 @@
+# Copyright 2019 Cargill Incorporated
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+FROM ubuntu:bionic
+
+# Install base dependencies
+ENV VERSION=AUTO_STRICT
+
+RUN apt-get update \
+ && apt-get install -y \
+ curl \
+ gcc \
+ libssl-dev \
+ libzmq3-dev \
+ pkg-config \
+ unzip
+
+ENV PATH=$PATH:/protoc3/bin:/root/.cargo/bin
+
+# Install Rust
+RUN curl https://sh.rustup.rs -sSf > /usr/bin/rustup-init \
+ && chmod +x /usr/bin/rustup-init \
+ && rustup-init -y
+
+RUN rustup update \
+ && rustup target add wasm32-unknown-unknown
+
+# Install protoc
+RUN curl -OLsS https://github.com/google/protobuf/releases/download/v3.7.1/protoc-3.7.1-linux-x86_64.zip \
+ && unzip -o protoc-3.7.1-linux-x86_64.zip -d /usr/local \
+ && rm protoc-3.7.1-linux-x86_64.zip
+
+# Create empty cargo project for sdk
+# We use cargo init here because we want the project
+# at the root of /build
+WORKDIR /build
+RUN USER=root cargo init --name sawtooth_sdk
+
+# Copy dependencies
+COPY protos /build/protos
+
+# Copy over Cargo.toml and build.rs for sdk
+COPY build.rs /build/build.rs
+COPY Cargo.toml /build/Cargo.toml
+
+# Do a release build to cache sdk dependencies
+WORKDIR /build
+RUN cargo build --target wasm32-unknown-unknown --release
+
+# Create empty cargo project for xo tp
+RUN mkdir examples \
+ && USER=root cargo new --bin examples/xo_rust \
+ && touch examples/xo_rust/src/lib.rs
+
+# Copy over Cargo.toml file
+COPY examples/xo_rust/Cargo.toml /build/examples/xo_rust/Cargo.toml
+
+# Do a release build to cache dependencies
+WORKDIR /build/examples/xo_rust
+RUN cargo build --target wasm32-unknown-unknown --release
+
+# Remove the auto-generated .rs files and the built files
+RUN rm src/*.rs
+RUN rm target/release/xo-tp-rust* target/release/deps/xo_tp_rust* \
+    target/release/libsawtooth_xo.*
+
+# Copy over source files
+COPY src /build/src
+COPY examples/xo_rust/src /build/examples/xo_rust/src
+
+# Build the contract
+RUN cargo build --target wasm32-unknown-unknown --release
+
+# Copy the packaging directory
+COPY examples/xo_rust/packaging/scar/* \
+     /build/examples/xo_rust/packaging/scar/
+
+# Copy the contract to the packaging directory
+RUN cp target/wasm32-unknown-unknown/release/xo-tp-rust.wasm \
+    packaging/scar
+
+WORKDIR /build/examples/xo_rust/packaging/scar
+
+# Create .scar file
+RUN tar -jcvf /tmp/xo_0.3.3.scar .
